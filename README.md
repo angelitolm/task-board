@@ -38,3 +38,7 @@ claude plugin test .
 ## Credits
 
 Icons from [Iconsax](https://iconsax-react.pages.dev/) (`iconsax-react`, MIT License, © Erfan Khadivar).
+
+## License
+
+[MIT](LICENSE)

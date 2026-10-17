@@ -3,6 +3,7 @@
   "version": "0.4.1",
   "description": "Live pane with the session's tasks (done / in progress / pending) and a little critter for every agent working on them",
   "author": { "name": "angelitolm" },
+  "license": "MIT",
   "repository": "https://github.com/angelitolm/task-board",
   "types": "./types/index.d.ts"
 }
