@@ -1,8 +1,9 @@
 export type TaskStatus = 'pending' | 'in_progress' | 'completed'
-/** One task; `agents` lists the loops working on it ('main' or a subagent id). */
-export type Task = { id: string; title: string; status: TaskStatus; agents: string[] }
+/** One task; `agents` lists the loops working on it ('main' or a subagent id), `loop` the one that wrote it. */
+export type Task = { id: string; title: string; status: TaskStatus; agents: string[]; loop?: string }
 /** One agent seen this session. */
-export type AgentSeen = { id: string; type: string; name: string; isDone: boolean }
+/** `activity`: what its latest tool call is doing, in words. */
+export type AgentSeen = { id: string; type: string; name: string; isDone: boolean; activity?: string }
 
 declare module 'claude-code' {
   interface PluginState {

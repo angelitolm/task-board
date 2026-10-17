@@ -41,7 +41,7 @@ export const replaceSource = (
   const fresh = items.map((it, i): Task => {
     const id = prefix + i
     const kept = old.get(id)?.agents ?? []
-    return { id, title: it.title, status: it.status, agents: it.status === 'pending' ? kept : addAgent(kept, loop) }
+    return { id, title: it.title, status: it.status, agents: it.status === 'pending' ? kept : addAgent(kept, loop), loop }
   })
   return [...all.filter(t => !t.id.startsWith(prefix)), ...fresh]
 }
@@ -99,10 +99,40 @@ export const applyCall = (all: Task[], tool: string, input: Record<string, unkno
   }
   if (tool === 'TaskCreate') {
     const id = (result as { task?: { id?: string } } | undefined)?.task?.id
-    return id ? [...all, { id: `task:${id}`, title: String(input.subject ?? ''), status: 'pending', agents: [] }] : all
+    return id ? [...all, { id: `task:${id}`, title: String(input.subject ?? ''), status: 'pending', agents: [], loop }] : all
   }
   return all
 }
+
+const base = (p: unknown) => String(p ?? '').split(/[\\/]/).pop() || ''
+const cut = (s: string, n = 60) => (s.length > n ? s.slice(0, n - 1) + '…' : s)
+
+/** One tool call in plain words, for the line under an agent: "Editando register.tsx". */
+export const describe = (tool: string, input: Record<string, unknown>): string => {
+  const str = (k: string) => (typeof input[k] === 'string' ? (input[k] as string) : '')
+  switch (tool) {
+    case 'Read': return `Leyendo ${base(input.file_path)}`
+    case 'Edit': case 'MultiEdit': case 'Write': case 'NotebookEdit': return `Editando ${base(input.file_path ?? input.notebook_path)}`
+    case 'Bash': case 'PowerShell': return cut(str('description') || `Ejecutando ${str('command')}`)
+    case 'Grep': return cut(`Buscando "${str('pattern')}"`)
+    case 'Glob': return cut(`Buscando archivos ${str('pattern')}`)
+    case 'WebFetch': return cut(`Leyendo ${str('url').replace(/^https?:\/\//, '').split('/')[0]}`)
+    case 'WebSearch': return cut(`Buscando en la web: ${str('query')}`)
+    case 'Agent': return cut(`Delegando: ${str('description')}`)
+    case 'Skill': return `Usando la skill ${str('skill')}`
+  }
+  if (TRACKED.has(tool)) return 'Actualizando su plan'
+  if (tool.startsWith('mcp__')) return cut(`Usando ${tool.split('__').pop()}`)
+  return tool
+}
+
+/** Claude's own row lives in the same list under id `main`, made on its first call. */
+export const setActivity = (list: AgentSeen[], id: string, activity: string | undefined): AgentSeen[] =>
+  list.some(a => a.id === id)
+    ? list.map(a => (a.id === id ? { ...a, activity } : a))
+    : id === MAIN
+      ? [...list, { id: MAIN, type: MAIN, name: 'Claude', isDone: false, activity }]
+      : list
 
 const DONE_STATUSES = new Set(['completed', 'failed', 'killed', 'idle'])
 
@@ -145,9 +175,11 @@ export const register: Register = on => {
 
   on('tool.call', async ($, e, next) => {
     const tool = String(e.tool)
-    if (!TRACKED.has(tool)) return next(e)
     const loop = e.agentId ?? MAIN
     const input = e as unknown as Record<string, unknown>
+    const activity = describe(tool, input)
+    await safe(update($, agents, list => setActivity(list, loop, activity)))
+    if (!TRACKED.has(tool)) return next(e)
     // TaskCreate learns its id from the result; the others act on what they were asked.
     if (tool === 'TaskCreate') {
       const ran = await next(e)
@@ -174,28 +206,49 @@ export const register: Register = on => {
 
   on('turn.complete', async ($, e, next) => {
     const id = e.agentId
-    if (id) await safe(update($, agents, list => list.map(a => (a.id === id ? { ...a, isDone: true } : a))))
+    if (id) await safe(update($, agents, list => list.map(a => (a.id === id ? { ...a, isDone: true, activity: undefined } : a))))
+    else await safe(update($, agents, list => setActivity(list, MAIN, undefined)))
     return next(e)
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const list = await read($, tasks)
+    const all = await read($, tasks)
     const seen = await read($, agents)
     const byId = new Map<string, AgentSeen>(seen.map(a => [a.id, a]))
+    // Your plan is what the main loop wrote; a subagent's own steps nest under that agent.
+    const list = all.filter(t => (t.loop ?? MAIN) === MAIN)
+    const stepsOf = (id: string) => all.filter(t => t.loop === id)
     const count = (s: TaskStatus) => list.filter(t => t.status === s).length
     const mainBusy = list.some(t => t.status === 'in_progress' && t.agents.includes(MAIN))
-    const live = (id: string) => (id === MAIN ? mainBusy : byId.get(id)?.isDone === false)
+    const claude: AgentSeen = { id: MAIN, type: MAIN, name: 'Claude', isDone: false, ...byId.get(MAIN) }
+    const subagents = seen.filter(a => a.id !== MAIN)
     // Team: Claude first, then running agents, then the last few that finished.
-    const team: AgentSeen[] = [
-      { id: MAIN, type: MAIN, name: 'Claude', isDone: false },
-      ...seen.filter(a => !a.isDone),
-      ...seen.filter(a => a.isDone).slice(-4),
-    ]
-    const who = (t: Task) => (t.status === 'in_progress' ? t.agents.filter(live) : t.status === 'completed' ? t.agents : [])
+    const team: AgentSeen[] = [claude, ...subagents.filter(a => !a.isDone), ...subagents.filter(a => a.isDone).slice(-4)]
+    // Under a task in progress: every subagent that worked on it, or Claude when it works alone.
+    const crewOf = (t: Task): AgentSeen[] => {
+      const subs = t.agents.filter(id => id !== MAIN).map(id => byId.get(id)).filter((a): a is AgentSeen => !!a)
+      return subs.length > 0 ? subs : t.agents.includes(MAIN) ? [claude] : []
+    }
+    const placed = new Set(list.filter(t => t.status === 'in_progress').flatMap(t => t.agents))
+    const loose = subagents.filter(a => !a.isDone && !placed.has(a.id))
+    const lineOf = (a: AgentSeen) => (a.isDone ? 'Terminado' : (a.activity ?? (a.id === MAIN ? 'Pensando' : 'Arrancando')))
 
     if (e.surface === 'terminal') {
       const { Box, Text } = $.ui.resolve(e)
-      const typeOf = (id: string) => (id === MAIN ? MAIN : (byId.get(id)?.type ?? 'agent'))
+      const agentLines = (a: AgentSeen) => (
+        <Box flexDirection="column" paddingLeft={3}>
+          <Text dimColor={a.isDone}>
+            {a.isDone ? '✓' : '↳'} {iconFor(a.type)} {a.name}
+            <Text dimColor> — {lineOf(a)}</Text>
+          </Text>
+          {stepsOf(a.id).map(st => (
+            <Text dimColor>
+              {'    '}
+              {MARK[st.status]} {st.title}
+            </Text>
+          ))}
+        </Box>
+      )
       return (
         <Box flexDirection="column">
           <Text bold>
@@ -203,11 +256,15 @@ export const register: Register = on => {
           </Text>
           {list.length === 0 && <Text dimColor>Sin tareas todavía.</Text>}
           {list.map(t => (
-            <Text dimColor={t.status === 'completed'} bold={t.status === 'in_progress'}>
-              {MARK[t.status]} {t.title}
-              {who(t).length > 0 ? '  ' + who(t).map(id => iconFor(typeOf(id))).join('') : ''}
-            </Text>
+            <Box flexDirection="column">
+              <Text dimColor={t.status === 'completed'} bold={t.status === 'in_progress'}>
+                {MARK[t.status]} {t.title}
+              </Text>
+              {t.status === 'in_progress' && crewOf(t).map(agentLines)}
+            </Box>
           ))}
+          {loose.length > 0 && <Text dimColor>Sin tarea asignada</Text>}
+          {loose.map(agentLines)}
         </Box>
       )
     }
@@ -217,11 +274,32 @@ export const register: Register = on => {
     const total = list.length
     const toyOf = (a: AgentSeen, mood: ToyMood) => toy(a.id === MAIN ? MAIN_COLOR : colorFor(a.id), mood)
     const moodOf = (a: AgentSeen): ToyMood => (a.isDone ? 'done' : a.id === MAIN && !mainBusy ? 'idle' : 'working')
-    const STATUS: Record<TaskStatus, { label: string }> = {
-      completed: { label: 'Completada' },
-      in_progress: { label: 'En curso' },
-      pending: { label: 'Pendiente' },
-    }
+    const LABEL: Record<TaskStatus, string> = { completed: 'Completada', in_progress: 'En curso', pending: 'Pendiente' }
+
+    // One agent under a task: its critter, name and live activity, then its own steps.
+    const agentRow = (a: AgentSeen, scope: string) => (
+      <Box key={`${scope}-${a.id}`} flexDirection="column" paddingLeft={3}>
+        <Box flexDirection="row" alignItems="center" gap={1}>
+          <Svg source={toyOf(a, moodOf(a))} alt={a.name} width={22} height={19} isInteractive={!a.isDone} />
+          <Box flexDirection="column" flexGrow={1} flexShrink={1}>
+            <Text size="footnote" weight="medium" dimColor={a.isDone} wrap="truncate-end">
+              {a.name}
+            </Text>
+            <Text size="caption" dimColor wrap="truncate-end">
+              {lineOf(a)}
+            </Text>
+          </Box>
+        </Box>
+        {stepsOf(a.id).map(st => (
+          <Box key={`${scope}-${a.id}-${st.id}`} flexDirection="row" alignItems="center" gap={1} paddingLeft={4}>
+            <Svg source={statusGlyph[st.status]} alt={LABEL[st.status]} width={12} height={12} isInteractive={st.status === 'in_progress'} />
+            <Text size="caption" dimColor={st.status !== 'in_progress'} wrap="truncate-end">
+              {st.title}
+            </Text>
+          </Box>
+        ))}
+      </Box>
+    )
 
     return (
       <Box flexDirection="column" gap={1}>
@@ -255,31 +333,27 @@ export const register: Register = on => {
 
         <Box flexDirection="column" borderStyle="round" paddingX={2} paddingY={1} gap={0}>
           {list.length === 0 && <Text dimColor>Sin tareas todavía.</Text>}
-          {list.map(t => {
-            const working = who(t).map(id => (id === MAIN ? team[0] : byId.get(id))).filter((a): a is AgentSeen => !!a)
-            return (
-              <Box key={`task-${t.id}`} flexDirection="column">
-                <Box flexDirection="row" alignItems="center" gap={1}>
-                  <Svg source={statusGlyph[t.status]} alt={STATUS[t.status].label} width={16} height={16} isInteractive={t.status === 'in_progress'} />
-                  <Box flexGrow={1} flexShrink={1}>
-                    <Text dimColor={t.status === 'completed'} wrap="truncate-end">
-                      {t.title}
-                    </Text>
-                  </Box>
+          {list.map(t => (
+            <Box key={`task-${t.id}`} flexDirection="column">
+              <Box flexDirection="row" alignItems="center" gap={1}>
+                <Svg source={statusGlyph[t.status]} alt={LABEL[t.status]} width={16} height={16} isInteractive={t.status === 'in_progress'} />
+                <Box flexGrow={1} flexShrink={1}>
+                  <Text dimColor={t.status === 'completed'} wrap="truncate-end">
+                    {t.title}
+                  </Text>
                 </Box>
-                {t.status === 'in_progress' && working.length > 0 && (
-                  <Box flexDirection="row" alignItems="center" gap={1} paddingLeft={3}>
-                    {working.map(a => (
-                      <Svg source={toyOf(a, 'working')} alt={a.name} width={18} height={16} isInteractive />
-                    ))}
-                    <Text size="footnote" dimColor wrap="truncate-end">
-                      {working.map(a => a.name).join(', ')}
-                    </Text>
-                  </Box>
-                )}
               </Box>
-            )
-          })}
+              {t.status === 'in_progress' && crewOf(t).map(a => agentRow(a, t.id))}
+            </Box>
+          ))}
+          {loose.length > 0 && (
+            <Box flexDirection="column" marginTop={1}>
+              <Text size="footnote" dimColor>
+                Sin tarea asignada
+              </Text>
+              {loose.map(a => agentRow(a, 'loose'))}
+            </Box>
+          )}
         </Box>
       </Box>
     )
@@ -288,4 +362,4 @@ export const register: Register = on => {
 
 /** What the toy is called: the agent's own name, else its short task, else its type. */
 export const agentName = (name: string | undefined, description: string | undefined, type: string): string =>
-  (name || description || type).trim().slice(0, 18)
+  cut((name || description || type).trim(), 40)

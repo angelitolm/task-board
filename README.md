@@ -4,7 +4,8 @@ A Claude Code mod that opens a live **Tareas** pane beside the conversation:
 
 - **Progress**: done / total with a bar.
 - **Equipo** (team): one boxy critter per agent, in the spirit of Claude's mascot. Claude itself is terracotta; every subagent gets its own color and its name. Critters walk and blink while they work and close their eyes when they finish.
-- **Task list** in the app's own todo style: grey check for done, spinner for in progress, dashed ring for pending. Under a task in progress, the critters and names of the agents working on it.
+- **Task list** in the app's own todo style: grey check for done, spinner for in progress, dashed ring for pending.
+- **Breakdown per agent**: under a task in progress, every agent working on it with what it is doing right now ("Editando register.tsx", "Ejecutando pnpm test") and, nested below, its own steps when it keeps a todo list.
 
 It follows `TaskCreate` / `TaskUpdate`, `TodoWrite` and the desktop app's plan, including calls made inside subagents. When a session is resumed it rebuilds the board from the transcript and the session's agent list.
 

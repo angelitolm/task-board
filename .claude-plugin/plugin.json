@@ -1,6 +1,6 @@
 {
   "name": "task-board",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "description": "Live pane with the session's tasks (done / in progress / pending) and a little critter for every agent working on them",
   "author": { "name": "angelitolm" },
   "license": "MIT",

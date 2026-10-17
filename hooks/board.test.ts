@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { colorFor, toy } from './art'
-import { agentName, applyCall, applyPlan, iconFor, replaceSource } from './register'
+import { agentName, applyCall, applyPlan, describe, iconFor, replaceSource, setActivity } from './register'
 
 test('plan: items, advance, done/start', () => {
   let all = applyPlan([], { items: [{ content: 'a', status: 'in_progress' }, { content: 'b', status: 'pending' }, { content: 'c', status: 'pending' }] }, 'main')
@@ -34,7 +34,7 @@ test('toys and names', () => {
   expect(toy('#fff', 'working')).toContain('animateTransform')
   expect(toy('#fff', 'done')).not.toContain('<rect x="20" y="17"')
   expect(colorFor('a1')).toBe(colorFor('a1'))
-  expect(agentName(undefined, 'Revisar el diff completo', 'Explore')).toBe('Revisar el diff co')
+  expect(agentName(undefined, 'Revisar el diff completo', 'Explore')).toBe('Revisar el diff completo')
   expect(agentName('', '', 'Plan')).toBe('Plan')
 })
 
@@ -46,4 +46,28 @@ test('replaying task calls rebuilds the board', () => {
   expect(all.map(t => [t.title, t.status])).toEqual([['Task 1', 'completed'], ['Task 2', 'in_progress']])
   expect(applyCall(all, 'TaskUpdate', { taskId: '1', status: 'deleted' }, 'main').length).toBe(1)
   expect(applyCall(all, 'Bash', {}, 'main')).toBe(all)
+})
+
+test('activity in plain words', () => {
+  expect(describe('Edit', { file_path: String.raw`C:\dev\app\hooks\register.tsx` })).toBe('Editando register.tsx')
+  expect(describe('Read', { file_path: '/a/b/art.ts' })).toBe('Leyendo art.ts')
+  expect(describe('Bash', { command: 'pnpm test', description: 'Corre los tests' })).toBe('Corre los tests')
+  expect(describe('Bash', { command: 'pnpm test' })).toBe('Ejecutando pnpm test')
+  expect(describe('TodoWrite', { todos: [] })).toBe('Actualizando su plan')
+  expect(describe('mcp__github__create_pr', {})).toBe('Usando create_pr')
+  expect(describe('Grep', { pattern: 'x'.repeat(80) }).length).toBe(60)
+})
+
+test('activity lands on the right agent; Claude row appears on demand', () => {
+  const list = [{ id: 'a1', type: 'Explore', name: 'Explore', isDone: false }]
+  expect(setActivity(list, 'a1', 'Leyendo x')[0]?.activity).toBe('Leyendo x')
+  expect(setActivity(list, 'zz', 'nada')).toEqual(list)
+  expect(setActivity(list, 'main', 'Pensando').find(a => a.id === 'main')?.name).toBe('Claude')
+})
+
+test("a subagent's own steps are tagged with its loop", () => {
+  let all = applyCall([], 'TodoWrite', { todos: [{ content: 'leer', status: 'completed' }, { content: 'editar', status: 'in_progress' }] }, 'a1')
+  all = applyCall(all, 'TaskCreate', { subject: 'Plan' }, 'main', { task: { id: '9' } })
+  expect(all.filter(t => t.loop === 'a1').map(t => t.title)).toEqual(['leer', 'editar'])
+  expect(all.find(t => t.id === 'task:9')?.loop).toBe('main')
 })
