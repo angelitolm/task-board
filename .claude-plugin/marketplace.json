@@ -1,0 +1,5 @@
+{
+  "name": "angel-mods",
+  "owner": { "name": "angelitolm" },
+  "plugins": [{ "name": "task-board", "source": "./", "description": "Live task board pane with agent critters for Claude Code" }]
+}
